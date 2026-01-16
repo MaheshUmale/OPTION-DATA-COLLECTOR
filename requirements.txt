@@ -1,0 +1,4 @@
+requests
+pandas
+tvdatafeed @ git+https://github.com/rongardF/tvdatafeed.git
+websocket-client
