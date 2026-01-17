@@ -1,174 +1,92 @@
 # OPTION-DATA-COLLECTOR
-CREATE PYTHON CODE AND SQLITE DB WHICH WILL COLLECT FOLLOWIND DATA FOR NIFTY AND BANKNIFTY PER MINUTE
 
-1) SPOT PRICE 
-2) OHLCV PER MINUTE USING tvDataFeed lib
-3) SPOT(ATM Strike ) +/- 7 Strike PE and CE OPTIONS PRICES , TOTAL OPEN INTEREST , CHANGE IN OI per minute , AND 
-4) TOTAL PCR  anc  CHANGE IN PCR per minute 
+A robust Python-based system for collecting, unifying, and storing per-minute options data for NIFTY and BANKNIFTY.
 
-THIS SCRIPT CAN USE NSE API , TVDATAFEED API , smartoptions.trendlyne API to FETCH AND CONSOLIDATE DATA INTO DATABASE.
+## Overview
 
+This collector consolidates data from multiple sources into a single, structured SQLite database, specifically designed for algorithmic trading and backtesting. It captures the index spot price, OHLCV, and the option chain premiums and Open Interest (OI) for the ATM and surrounding strikes.
 
-""""""""""""""""
-import requests
+## Key Features
 
-class TrendlyneClient:
-    def __init__(self):
-        self.base_url = "https://smartoptions.trendlyne.com/phoenix/api"
+- **Unified Data Stream**: Merges NSE Option Chain data with TradingView OHLCV data in real-time.
+- **ATM +/- 7 Strikes**: Automatically calculates the At-The-Money (ATM) strike and captures data for 15 strikes (ATM and 7 above/below).
+- **PCR Analytics**: Computes Total Put-Call Ratio (PCR) and its change per minute.
+- **Market Awareness**:
+    - Automatically handles Indian Market Hours (09:15 to 15:30 IST).
+    - Fetches and respects the official NSE holiday calendar.
+- **Datewise Organization**: All data is timestamped and indexed, allowing for easy retrieval and analysis on a per-day basis.
 
-    def get_stock_id_for_symbol(self, symbol):
-        # Strip common prefixes
-        s = symbol.upper()
-        if '|' in s:
-            s = s.split('|')[-1]
-        
-        # Map indices to Trendlyne ticker codes
-        if "NIFTY 50" in s or s == "NIFTY":
-            s = "NIFTY"
-        elif "NIFTY BANK" in s or s == "BANKNIFTY":
-            s = "BANKNIFTY"
-            
-        search_url = f"{self.base_url}/search-contract-stock/"
-        params = {'query': s.lower()}
-        try:
-            response = requests.get(search_url, params=params, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-            if data and 'body' in data and 'data' in data['body'] and len(data['body']['data']) > 0:
-                for item in data['body']['data']:
-                    target_code = item.get('stock_code', '').upper()
-                    if target_code == s:
-                        return item['stock_id']
-                return data['body']['data'][0]['stock_id']
-            return None
-        except Exception as e:
-            print(f"[Trendlyne] Error fetching stock ID for {symbol}: {e}")
-            return None
+## Installation
 
-    def get_expiry_dates(self, stock_id):
-        expiry_url = f"{self.base_url}/fno/get-expiry-dates/?mtype=options&stock_id={stock_id}"
-        try:
-            response = requests.get(expiry_url, timeout=5)
-            response.raise_for_status()
-            return response.json().get('body', {}).get('expiryDates', [])
-        except Exception as e:
-            print(f"[Trendlyne] Error fetching expiry dates: {e}")
-            return []
+1. **Clone the repository**:
+   ```bash
+   git clone <repository-url>
+   cd OPTION-DATA-COLLECTOR
+   ```
 
-    def get_live_oi_data(self, stock_id, expiry_date, min_time, max_time):
-        url = f"{self.base_url}/live-oi-data/"
-        params = {
-            'stockId': stock_id,
-            'expDateList': expiry_date,
-            'minTime': min_time,
-            'maxTime': max_time
-        }
-        try:
-            response = requests.get(url, params=params, timeout=10)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            print(f"[Trendlyne] Error fetching live OI data: {e}")
-            return None
+2. **Install dependencies**:
+   ```bash
+   pip install -r requirements.txt
+   ```
+   *The `tvdatafeed` library is automatically installed from its GitHub source.*
 
-""""""""""
-from tvDatafeed import TvDatafeed, Interval
-self.tv = TvDatafeed()
+## Usage
 
-tv.get_hist(
-                symbol=symbol,
-                exchange=exchange,
-                interval=interval,
-                n_bars=n_bars
-            )
+### 1. Data Collection
+Start the minute-by-minute collection loop:
+```bash
+python collector.py
+```
+The script will run continuously, entering a sleep state outside of market hours or on holidays.
 
-""""""""""""""""""""""""""""""""""""
-import requests
-import time
+### 2. Exporting Data
+To export data for a specific date (e.g., for use in Excel or Pandas):
+```bash
+python export_data.py 2026-01-16
+```
+This will generate a `options_data_2026-01-16.csv` file with a unified view of index and option data.
 
-class NSEClient:
-    def __init__(self):
-        self.base_url = "https://www.nseindia.com"
-        self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-            "Accept": "*/*",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Referer": "www.nseindia.com",
-            "Connection": "keep-alive"
-        }
-        self.session = requests.Session()
-        self.session.headers.update(self.headers)
-        self._init_session()
+## Project Architecture
 
-    def _init_session(self):
-        if not self.session.cookies:
-            try:
-                # First hit homepage
-                self.session.get(self.base_url, timeout=15)
-                # Then hit a subpage to ensure cookies are fully set
-                self.session.get(f"{self.base_url}/market-data/live-equity-market", timeout=15)
-            except Exception as e:
-                print(f"[NSE] Failed to initialize session: {e}")
+- `collector.py`: Orchestrates the collection loop, ATM calculation, and data merging.
+- `clients.py`: Contains optimized API clients:
+    - `NSEClient`: Fetches option chains with session/cookie handling.
+    - `TVClient`: Fetches minute-wise index OHLCV.
+    - `TrendlyneClient`: Optional client for alternative OI data.
+- `database.py`: Defines the SQLite schema and handles atomic data inserts.
+- `export_data.py`: Utility to pull unified data into CSV format.
 
-    def _make_get_request(self, url, params=None):
-        time.sleep(1.0) # Be more conservative with NSE
-        try:
-            response = self.session.get(url, params=params, timeout=15)
-            if response.status_code == 401 or response.status_code == 403:
-                print(f"[NSE] Session expired or blocked. Re-initializing...")
-                self.session.cookies.clear()
-                self._init_session()
-                response = self.session.get(url, params=params, timeout=15)
-            
-            response.raise_for_status()
-            try:
-                return response.json()
-            except ValueError:
-                print(f"[NSE] Failed to decode JSON from {url}. Response started with: {response.text[:100]}")
-                return None
-        except requests.exceptions.HTTPError as e:
-            print(f"[NSE] HTTP error: {e.response.status_code}")
-        except requests.exceptions.RequestException as e:
-            print(f"[NSE] Request failed: {e}")
-        return None
+## Database Schema
 
-    def get_option_chain(self, symbol, indices=True):
-        instrument_type = "Indices" if indices else "Equities"
-        url = f"{self.base_url}/api/option-chain-v3"
-        params = {"type": instrument_type, "symbol": symbol}
-        headers = self.headers.copy()
-        headers["Referer"] = f"{self.base_url}/get-quotes/derivatives?symbol={symbol}"
-        self.session.headers.update(headers)
-        return self._make_get_request(url, params=params)
+The system uses `options_data.db` with two related tables:
 
-    def get_market_breadth(self):
-        url = f"{self.base_url}/api/live-analysis-advance"
-        headers = self.headers.copy()
-        headers["Referer"] = f"{self.base_url}/market-data/live-equity-market"
-        self.session.headers.update(headers)
-        return self._make_get_request(url)
+### `market_data`
+| Column | Type | Description |
+| --- | --- | --- |
+| `timestamp` | DATETIME | ISO format timestamp (YYYY-MM-DD HH:MM:SS) |
+| `symbol` | TEXT | Index symbol (NIFTY/BANKNIFTY) |
+| `spot_price` | REAL | Current underlying index price |
+| `open`, `high`, `low`, `close` | REAL | Minute OHLCV for the index |
+| `volume` | REAL | Index trading volume |
+| `total_pcr` | REAL | PCR for the entire option chain |
+| `pcr_change` | REAL | Change in PCR since the last minute |
 
-    def get_holiday_list(self):
-        url = f"{self.base_url}/api/holiday-master"
-        headers = self.headers.copy()
-        headers["Referer"] = f"{self.base_url}/resources/exchange-communication-holidays"
-        self.session.headers.update(headers)
-        data = self._make_get_request(url)
-        if data and 'trading' in data:
-            return [h['tradingDate'] for h in data['trading']]
-        return []
+### `option_data`
+| Column | Type | Description |
+| --- | --- | --- |
+| `timestamp` | DATETIME | Matches `market_data.timestamp` |
+| `strike_price` | REAL | The strike price of the contract |
+| `expiry_date` | TEXT | Contract expiry (DD-MMM-YYYY) |
+| `option_type` | TEXT | CE or PE |
+| `price` | REAL | Last Traded Price (LTP) |
+| `oi` | REAL | Open Interest |
+| `oi_change` | REAL | Change in OI since previous record |
 
-    def get_indices(self):
-        """
-        Fetches the current data for all NSE indices.
-        URL: https://www.nseindia.com/api/allIndices
-        """
-        url = f"{self.base_url}/api/allIndices"
-        headers = self.headers.copy()
-        headers["Referer"] = f"{self.base_url}/market-data/live-equity-market"
-        self.session.headers.update(headers)
-        return self._make_get_request(url)
+## Troubleshooting
 
-"""""""""""""""""""
+- **NSE Connectivity**: If the NSE API blocks your IP, the script will automatically attempt to re-initialize the session. Ensure you are not running multiple instances against the same API.
+- **TradingView Volume**: TradingView volume for indices can sometimes be zero; the system captures it as provided by the `tvDatafeed`.
+- **Database Access**: You can view the data using any SQLite browser (e.g., DB Browser for SQLite).
 
-
+---
+*Developed for integration with Scalping Orchestration System (SOS).*
