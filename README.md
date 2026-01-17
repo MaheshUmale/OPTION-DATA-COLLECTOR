@@ -13,6 +13,7 @@ This collector consolidates data from multiple sources into a single, structured
 - **ATM +/- 7 Strikes**: Captures data for 15 strikes (ATM and 7 above/below).
 - **PCR Analytics**: Computes Total Put-Call Ratio (PCR) and its change per minute.
 - **Market Awareness**: Handles Indian Market Hours (09:15 to 15:30 IST) and respects official NSE holidays.
+- **Backfill Capability**: Fetches historical OHLCV and Options data from TradingView and Trendlyne if data is missing for a specific date.
 - **Configurable**: Uses `config.json` for easy adjustment of symbols, strike gaps, and database settings.
 
 ## Installation
@@ -34,22 +35,28 @@ This collector consolidates data from multiple sources into a single, structured
 
 ## Usage
 
-### 1. Data Collection
+### 1. Real-time Data Collection
 Start the minute-by-minute collection loop:
 ```bash
 python collector.py
 ```
-The script will run continuously, entering a sleep state outside of market hours or on holidays.
 
-### 2. Exporting Data
-To export unified data for a specific date:
+### 2. Historical Backfilling
+To fetch missing data for a specific date (using TradingView and Trendlyne):
+```bash
+python backfiller.py YYYY-MM-DD
+```
+
+### 3. Exporting Data
+To export unified data for a specific date to CSV:
 ```bash
 python export_data.py YYYY-MM-DD
 ```
 
 ## Project Architecture
 
-- `collector.py`: Main execution loop, ATM calculation, and data merging.
+- `collector.py`: Main execution loop for real-time data.
+- `backfiller.py`: Utility to backfill historical data for missing dates.
 - `clients.py`: API clients for NSE, TradingView (`tvDatafeed`), and Trendlyne.
 - `database.py`: SQLite database management.
 - `config.json`: System configuration.
@@ -57,24 +64,7 @@ python export_data.py YYYY-MM-DD
 
 ## Database Schema
 
-The system uses `options_data.db` with two related tables:
-
-### `market_data`
-| Column | Description |
-| --- | --- |
-| `timestamp` | ISO format timestamp (YYYY-MM-DD HH:MM:SS) |
-| `symbol` | Canonical symbol (e.g., `NSE|INDEX|NIFTY`) |
-| `spot_price` | Current underlying index price |
-| `open`, `high`, `low`, `close` | Minute OHLCV for the index |
-| `total_pcr` | PCR for the entire option chain |
-
-### `option_data`
-| Column | Description |
-| --- | --- |
-| `strike_price` | The strike price of the contract |
-| `option_type` | CE or PE |
-| `price` | Last Traded Price (LTP) |
-| `oi` | Open Interest |
+The system uses `options_data.db` with two related tables: `market_data` (index spot, OHLCV, PCR) and `option_data` (strike prices, premiums, OI).
 
 ---
-*Developed for Scalping Orchestration System (SOS).*
+*Developed for integration with Scalping Orchestration System (SOS).*
