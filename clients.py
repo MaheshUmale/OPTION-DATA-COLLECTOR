@@ -169,3 +169,26 @@ class TrendlyneClient:
             return response.json()
         except Exception:
             return None
+
+    def get_oi_snapshot(self, stock_id, expiry_date, timestamp_hhmm, min_time="09:15"):
+        """
+        Fetch a snapshot of the entire option chain at a specific time.
+        timestamp_hhmm: 'HH:MM' (e.g., '10:30')
+        """
+        url = f"{self.base_url}/live-oi-data/"
+        params = {
+            'stockId': stock_id,
+            'expDateList': expiry_date,
+            'minTime': min_time,
+            'maxTime': timestamp_hhmm
+        }
+
+        try:
+            response = requests.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            if data['head']['status'] == '0':
+                return data['body']
+        except Exception as e:
+            print(f"[Trendlyne] Error fetching OI snapshot for {stock_id} at {timestamp_hhmm}: {e}")
+        return None

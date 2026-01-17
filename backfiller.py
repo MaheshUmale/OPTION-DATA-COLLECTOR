@@ -37,6 +37,14 @@ class Backfiller:
 
         for symbol in self.symbols:
             clean_symbol = self.get_clean_symbol(symbol)
+
+            # Skip if already in DB for this date
+            with self.db._get_connection() as conn:
+                count = conn.execute("SELECT COUNT(*) FROM market_data WHERE symbol=? AND timestamp LIKE ?", (symbol, f"{date_str}%")).fetchone()[0]
+                if count >= 370: # Roughly full day
+                    print(f"\n[Skipping {symbol}] Already has {count} records for {date_str}")
+                    continue
+
             print(f"\n[Processing {symbol}]")
 
             # 1. Fetch OHLCV from TV
@@ -54,11 +62,13 @@ class Backfiller:
                 print(f"No OHLCV data for {date_str}")
                 continue
 
-            # 2. Get Expiry and Spot Price for ATM calculation
-            # Use current NSE client to get near expiry (might not be exact for deep history)
+            # 2. Get Stock ID and Expiry
             stock_id = self.tl.get_stock_id_for_symbol(clean_symbol)
-            expiries = self.tl.get_expiry_dates(stock_id) if stock_id else []
+            if not stock_id:
+                print(f"Could not find stock ID for {clean_symbol}")
+                continue
 
+            expiries = self.tl.get_expiry_dates(stock_id)
             current_expiry = None
             for exp in expiries:
                 if exp >= date_str:
@@ -68,91 +78,109 @@ class Backfiller:
                 print(f"Could not determine expiry for {date_str}")
                 continue
 
-            # ATM Strike from first OHLCV bar or last? Let's use opening of the day.
-            spot_price = ohlcv_df['open'].iloc[0]
-            strike_gap = self.get_strike_gap(clean_symbol)
-            atm_strike = round(spot_price / strike_gap) * strike_gap
-            relevant_strikes = [atm_strike + i * strike_gap for i in range(-7, 8)]
+            print(f"Date: {date_str}, Expiry: {current_expiry}, Stock ID: {stock_id}")
 
-            print(f"Date: {date_str}, Spot: {spot_price}, ATM: {atm_strike}, Expiry: {current_expiry}")
+            # 3. Generate time slots (every minute)
+            start_dt = datetime.strptime(f"{date_str} 09:15", "%Y-%m-%d %H:%M")
+            end_dt = datetime.strptime(f"{date_str} 15:30", "%Y-%m-%d %H:%M")
+            time_slots = []
+            curr = start_dt
+            while curr <= end_dt:
+                time_slots.append(curr.strftime("%H:%M"))
+                curr += timedelta(minutes=1)
 
-            # 3. Fetch Buildup data for each strike
+            # 4. Fetch Snapshots and collect data
+            all_market_records = []
             all_option_records = []
-            for strike in relevant_strikes:
-                for opt_type in ['call', 'put']:
-                    # print(f"  Fetching buildup for {strike} {opt_type}...")
-                    buildup_data = self.tl.get_options_buildup(clean_symbol, current_expiry, strike, opt_type)
 
-                    if buildup_data and 'body' in buildup_data and 'data_v2' in buildup_data['body']:
-                        data_v2 = buildup_data['body']['data_v2']
-                        # print(f"    Found {len(data_v2)} records.")
+            # Map OHLCV by time for easy lookup
+            ohlcv_map = {ts.strftime("%H:%M"): row for ts, row in ohlcv_df.iterrows()}
 
-                        for entry in data_v2:
-                            # interval: "15:25 TO 15:30"
-                            interval_str = entry.get('interval')
-                            if not interval_str: continue
+            prev_pcr = None
 
-                            try:
-                                end_time_str = interval_str.split(" TO ")[1]
-                                timestamp_str = f"{date_str} {end_time_str}:00"
+            for ts_hhmm in time_slots:
+                snapshot = self.tl.get_oi_snapshot(stock_id, current_expiry, ts_hhmm)
 
-                                all_option_records.append({
-                                    'timestamp': timestamp_str,
-                                    'symbol': symbol,
-                                    'strike_price': strike,
-                                    'expiry_date': current_expiry,
-                                    'option_type': 'CE' if opt_type == 'call' else 'PE',
-                                    'price': entry.get('close_price'),
-                                    'oi': entry.get('open_interest'),
-                                    'oi_change': entry.get('oi_change_gross')
-                                })
-                            except Exception as e:
-                                # print(f"Error parsing interval {interval_str}: {e}")
-                                continue
-                    time.sleep(0.1) # Be nice to API
+                if snapshot:
+                    oi_data = snapshot.get('oiData', {})
+                    total_call_oi = 0
+                    total_put_oi = 0
 
-            # 4. Fetch PCR Data (Using historical OI endpoint as it often has PCR)
-            tl_oi_data = self.tl.get_historical_oi(clean_symbol, date_str)
-            timestamp_pcr_map = {}
-            if tl_oi_data and 'body' in tl_oi_data:
-                body = tl_oi_data['body']
-                # Try overallData first
-                overall = body.get('overallData', {})
-                if overall and 'totalPCR' in overall:
-                    # If single point, apply to all market records or just last?
-                    pass
+                    timestamp_full = f"{date_str} {ts_hhmm}:00"
 
-                # Check for historical pcr series if available
-                pcr_list = body.get('pcrData', [])
-                if pcr_list:
-                    pcr_list.sort(key=lambda x: x.get('time', 0))
-                    prev_pcr = None
-                    for entry in pcr_list:
-                        ts = datetime.fromtimestamp(entry['time'] / 1000.0).strftime("%Y-%m-%d %H:%M:%S")
-                        curr_pcr = entry.get('pcr')
-                        pcr_change = (curr_pcr - prev_pcr) if prev_pcr is not None else 0
-                        timestamp_pcr_map[ts] = {'total_pcr': curr_pcr, 'pcr_change': pcr_change}
-                        prev_pcr = curr_pcr
+                    for strike_str, strike_data in oi_data.items():
+                        c_oi = float(strike_data.get('callOi', 0))
+                        p_oi = float(strike_data.get('putOi', 0))
+                        total_call_oi += c_oi
+                        total_put_oi += p_oi
 
-            # 5. Save everything
-            print(f"Saving {len(ohlcv_df)} market data records...")
-            for ts, row in ohlcv_df.iterrows():
-                ts_str = ts.strftime("%Y-%m-%d %H:%M:%S")
-                pcr_info = timestamp_pcr_map.get(ts_str, {'total_pcr': None, 'pcr_change': None})
+                        # Add option records
+                        all_option_records.append({
+                            'timestamp': timestamp_full,
+                            'symbol': symbol,
+                            'strike_price': float(strike_str),
+                            'expiry_date': current_expiry,
+                            'option_type': 'CE',
+                            'price': strike_data.get('callClose', 0),
+                            'oi': c_oi,
+                            'oi_change': float(strike_data.get('callOiChange', 0))
+                        })
+                        all_option_records.append({
+                            'timestamp': timestamp_full,
+                            'symbol': symbol,
+                            'strike_price': float(strike_str),
+                            'expiry_date': current_expiry,
+                            'option_type': 'PE',
+                            'price': strike_data.get('putClose', 0),
+                            'oi': p_oi,
+                            'oi_change': float(strike_data.get('putOiChange', 0))
+                        })
 
-                market_record = {
-                    'timestamp': ts_str,
-                    'symbol': symbol,
-                    'spot_price': row['close'],
-                    'open': row['open'],
-                    'high': row['high'],
-                    'low': row['low'],
-                    'close': row['close'],
-                    'volume': row['volume'],
-                    'total_pcr': pcr_info['total_pcr'],
-                    'pcr_change': pcr_info['pcr_change']
-                }
-                self.db.save_market_data(market_record)
+                    current_pcr = round(total_put_oi / total_call_oi, 4) if total_call_oi > 0 else 1.0
+                    pcr_change = (current_pcr - prev_pcr) if prev_pcr is not None else 0
+                    prev_pcr = current_pcr
+
+                    # Match with OHLCV
+                    ohlc = ohlcv_map.get(ts_hhmm)
+                    market_record = {
+                        'timestamp': timestamp_full,
+                        'symbol': symbol,
+                        'spot_price': ohlc['close'] if ohlc is not None else None,
+                        'open': ohlc['open'] if ohlc is not None else None,
+                        'high': ohlc['high'] if ohlc is not None else None,
+                        'low': ohlc['low'] if ohlc is not None else None,
+                        'close': ohlc['close'] if ohlc is not None else None,
+                        'volume': ohlc['volume'] if ohlc is not None else None,
+                        'total_pcr': current_pcr,
+                        'pcr_change': pcr_change
+                    }
+                    all_market_records.append(market_record)
+                else:
+                    # If snapshot fails, still try to save OHLCV if available
+                    ohlc = ohlcv_map.get(ts_hhmm)
+                    if ohlc is not None:
+                        timestamp_full = f"{date_str} {ts_hhmm}:00"
+                        all_market_records.append({
+                            'timestamp': timestamp_full,
+                            'symbol': symbol,
+                            'spot_price': ohlc['close'],
+                            'open': ohlc['open'],
+                            'high': ohlc['high'],
+                            'low': ohlc['low'],
+                            'close': ohlc['close'],
+                            'volume': ohlc['volume'],
+                            'total_pcr': None,
+                            'pcr_change': None
+                        })
+
+                # Small delay to prevent hitting rate limits
+                time.sleep(0.05)
+
+            # 5. Bulk Save
+            if all_market_records:
+                print(f"Saving {len(all_market_records)} market data records...")
+                for record in all_market_records:
+                    self.db.save_market_data(record)
 
             if all_option_records:
                 print(f"Saving {len(all_option_records)} option records...")
