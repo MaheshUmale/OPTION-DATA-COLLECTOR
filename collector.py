@@ -1,47 +1,53 @@
 import time
+import json
+import os
 import pandas as pd
 from datetime import datetime, time as dtime
 from clients import NSEClient, TVClient
 from database import Database
-import math
 
 class DataCollector:
-    def __init__(self):
+    def __init__(self, config_path="config.json"):
+        with open(config_path, "r") as f:
+            self.config = json.load(f)
+
         self.nse = NSEClient()
         self.tv = TVClient()
-        self.db = Database()
-        self.symbols = ["NIFTY", "BANKNIFTY"]
-        self.tv_symbols = {"NIFTY": "NIFTY", "BANKNIFTY": "BANKNIFTY"}
-        self.previous_pcr = {"NIFTY": None, "BANKNIFTY": None}
+        self.db = Database(self.config.get("db_name", "options_data.db"))
+        self.symbols = self.config.get("symbols", ["NSE|INDEX|NIFTY", "NSE|INDEX|BANKNIFTY"])
+        self.previous_pcr = {s: None for s in self.symbols}
+
+    def get_clean_symbol(self, symbol):
+        if '|' in symbol:
+            return symbol.split('|')[-1]
+        return symbol
 
     def get_atm_strike(self, spot_price, strike_gap):
         return round(spot_price / strike_gap) * strike_gap
 
-    def get_strike_gap(self, symbol):
-        if symbol == "NIFTY":
-            return 50
-        if symbol == "BANKNIFTY":
-            return 100
-        return 100
+    def get_strike_gap(self, clean_symbol):
+        gaps = self.config.get("strike_gaps", {})
+        return gaps.get(clean_symbol, 100)
 
-    def process_symbol(self, symbol):
-        print(f"[{datetime.now()}] Processing {symbol}...")
+    def process_symbol(self, full_symbol):
+        clean_symbol = self.get_clean_symbol(full_symbol)
+        print(f"[{datetime.now()}] Processing {full_symbol}...")
 
         # 1. Fetch Option Chain from NSE
-        oc_data = self.nse.get_option_chain(symbol)
+        oc_data = self.nse.get_option_chain(clean_symbol)
         if not oc_data:
-            print(f"Failed to fetch option chain for {symbol}")
+            print(f"Failed to fetch option chain for {clean_symbol}")
             return
 
-        # 2. Get Spot Price from Option Chain data (most reliable for the chain)
+        # 2. Get Spot Price
         spot_price = oc_data.get('records', {}).get('underlyingValue')
         if not spot_price:
-            print(f"No spot price found for {symbol}")
+            print(f"No spot price found for {clean_symbol}")
             return
 
         # 3. Fetch OHLCV from TradingView
-        tv_symbol = self.tv_symbols.get(symbol)
-        ohlcv_df = self.tv.get_ohlcv(tv_symbol)
+        # TradingView usually uses just NIFTY or BANKNIFTY for NSE
+        ohlcv_df = self.tv.get_ohlcv(clean_symbol)
         ohlcv = {}
         if ohlcv_df is not None and not ohlcv_df.empty:
             last_row = ohlcv_df.iloc[-1]
@@ -52,77 +58,53 @@ class DataCollector:
                 'close': last_row['close'],
                 'volume': last_row['volume']
             }
-        else:
-            print(f"No OHLCV data from TV for {symbol}")
 
         # 4. Filter Option Chain for +/- 7 strikes around ATM
-        strike_gap = self.get_strike_gap(symbol)
+        strike_gap = self.get_strike_gap(clean_symbol)
         atm_strike = self.get_atm_strike(spot_price, strike_gap)
 
         relevant_strikes = [atm_strike + i * strike_gap for i in range(-7, 8)]
 
         records = oc_data.get('records', {}).get('data', [])
-        filtered_records = [r for r in records if r['strikePrice'] in relevant_strikes]
-
-        # Get current expiry (first one available)
         expiry_dates = oc_data.get('records', {}).get('expiryDates', [])
         if not expiry_dates:
-            print(f"No expiry dates found for {symbol}")
             return
         current_expiry = expiry_dates[0]
 
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         option_entries = []
-        for r in filtered_records:
-            if r['expiryDate'] != current_expiry:
-                continue
-
-            strike = r['strikePrice']
-
-            # CE
-            if 'CE' in r:
-                ce = r['CE']
-                option_entries.append({
-                    'timestamp': timestamp,
-                    'symbol': symbol,
-                    'strike_price': strike,
-                    'expiry_date': current_expiry,
-                    'option_type': 'CE',
-                    'price': ce.get('lastPrice'),
-                    'oi': ce.get('openInterest'),
-                    'oi_change': ce.get('changeinOpenInterest')
-                })
-
-            # PE
-            if 'PE' in r:
-                pe = r['PE']
-                option_entries.append({
-                    'timestamp': timestamp,
-                    'symbol': symbol,
-                    'strike_price': strike,
-                    'expiry_date': current_expiry,
-                    'option_type': 'PE',
-                    'price': pe.get('lastPrice'),
-                    'oi': pe.get('openInterest'),
-                    'oi_change': pe.get('changeinOpenInterest')
-                })
+        for r in records:
+            if r['strikePrice'] in relevant_strikes and r['expiryDate'] == current_expiry:
+                strike = r['strikePrice']
+                for opt_type in ['CE', 'PE']:
+                    if opt_type in r:
+                        opt = r[opt_type]
+                        option_entries.append({
+                            'timestamp': timestamp,
+                            'symbol': full_symbol,
+                            'strike_price': strike,
+                            'expiry_date': current_expiry,
+                            'option_type': opt_type,
+                            'price': opt.get('lastPrice'),
+                            'oi': opt.get('openInterest'),
+                            'oi_change': opt.get('changeinOpenInterest')
+                        })
 
         # 5. Calculate PCR
-        # Use filtered records or all records for total PCR? README says "TOTAL PCR"
         total_pe_oi = oc_data.get('filtered', {}).get('PE', {}).get('totOI', 0)
         total_ce_oi = oc_data.get('filtered', {}).get('CE', {}).get('totOI', 0)
 
         total_pcr = total_pe_oi / total_ce_oi if total_ce_oi != 0 else 0
         pcr_change = 0
-        if self.previous_pcr[symbol] is not None:
-            pcr_change = total_pcr - self.previous_pcr[symbol]
-        self.previous_pcr[symbol] = total_pcr
+        if self.previous_pcr[full_symbol] is not None:
+            pcr_change = total_pcr - self.previous_pcr[full_symbol]
+        self.previous_pcr[full_symbol] = total_pcr
 
         # 6. Save to DB
         market_data_record = {
             'timestamp': timestamp,
-            'symbol': symbol,
+            'symbol': full_symbol,
             'spot_price': spot_price,
             'open': ohlcv.get('open'),
             'high': ohlcv.get('high'),
@@ -135,29 +117,26 @@ class DataCollector:
 
         self.db.save_market_data(market_data_record)
         self.db.save_option_data(option_entries)
-        print(f"Saved data for {symbol} at {timestamp}")
+        print(f"Saved data for {full_symbol} at {timestamp}")
 
     def is_market_open(self):
-        # Indian Market Hours: 9:15 AM to 3:30 PM (9:15 to 15:30)
         now = datetime.now()
-        # Market is closed on Saturday and Sunday
-        if now.weekday() >= 5:
-            return False
+        if now.weekday() >= 5: return False
 
-        start_time = dtime(9, 15)
-        end_time = dtime(15, 30)
-        return start_time <= now.time() <= end_time
+        m_hours = self.config.get("market_hours", {"start": "09:15", "end": "15:30"})
+        start_h, start_m = map(int, m_hours["start"].split(":"))
+        end_h, end_m = map(int, m_hours["end"].split(":"))
+
+        return dtime(start_h, start_m) <= now.time() <= dtime(end_h, end_m)
 
     def run(self):
-        print("Starting Data Collector...")
-        # Get holidays once
+        print(f"Starting Data Collector with symbols: {self.symbols}")
         holidays = self.nse.get_holiday_list()
 
         while True:
             if self.is_market_open():
                 today_str = datetime.now().strftime("%d-%b-%Y")
                 if today_str in holidays:
-                    print(f"Today ({today_str}) is a holiday. Sleeping...")
                     time.sleep(3600)
                     continue
 
@@ -167,10 +146,8 @@ class DataCollector:
                     except Exception as e:
                         print(f"Error processing {symbol}: {e}")
 
-                # Sleep until next minute
                 time.sleep(60)
             else:
-                # print("Market is closed. Waiting...")
                 time.sleep(60)
 
 if __name__ == "__main__":
