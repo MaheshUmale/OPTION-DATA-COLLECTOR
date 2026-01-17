@@ -80,6 +80,13 @@ class TrendlyneClient:
     def __init__(self):
         self.base_url = "https://smartoptions.trendlyne.com/phoenix/api"
 
+    def format_expiry_for_url(self, expiry_date):
+        """
+        expiry_date: 'YYYY-MM-DD' -> 'DD-mon-YYYY-near'
+        """
+        dt = datetime.strptime(expiry_date, "%Y-%m-%d")
+        return dt.strftime("%d-%b-%Y").lower() + "-near"
+
     def get_stock_id_for_symbol(self, symbol):
         s = symbol.upper().split('|')[-1] if '|' in symbol else symbol.upper()
         if "NIFTY" in s and "BANK" not in s: search_query = "NIFTY"
@@ -106,27 +113,40 @@ class TrendlyneClient:
         except Exception:
             return []
 
-    def get_live_oi_data(self, stock_id, expiry_date, min_time, max_time):
+    def get_options_buildup(self, symbol, expiry_date, strike, option_type, interval=5):
+        """
+        symbol: 'NIFTY' or 'BANKNIFTY'
+        expiry_date: 'YYYY-MM-DD'
+        strike: 25700
+        option_type: 'call' or 'put'
+        """
+        clean_symbol = symbol.upper()
+        if "NIFTY" in clean_symbol and "BANK" not in clean_symbol: clean_symbol = "NIFTY"
+        elif "BANK" in clean_symbol: clean_symbol = "BANKNIFTY"
+
+        expiry_formatted = self.format_expiry_for_url(expiry_date)
+
+        url = f"{self.base_url}/fno/buildup-{interval}/{expiry_formatted}/{clean_symbol}/"
         params = {
-            'stockId': stock_id,
-            'expDateList': expiry_date,
-            'minTime': min_time,
-            'maxTime': max_time
+            'fno_mtype': 'options',
+            'strikePrice': strike,
+            'option_type': option_type
         }
         try:
-            response = requests.get(f"{self.base_url}/live-oi-data/", params=params, timeout=10)
+            response = requests.get(url, params=params, timeout=10)
+            response.raise_for_status()
             return response.json()
-        except Exception:
+        except Exception as e:
+            # print(f"[Trendlyne] Error fetching buildup: {e}")
             return None
 
     def get_historical_oi(self, symbol, date_str):
+        # Kept for compatibility, but buildup is preferred for strike-wise history
         stock_id = self.get_stock_id_for_symbol(symbol)
         if not stock_id: return None
         expiries = self.get_expiry_dates(stock_id)
         if not expiries: return None
 
-        # Check if requested date is in expiries list (if date_str is an expiry)
-        # or just take the first expiry that is >= date_str
         current_expiry = None
         for exp in expiries:
             if exp >= date_str:
@@ -135,11 +155,17 @@ class TrendlyneClient:
         if not current_expiry: current_expiry = expiries[0]
 
         dt = datetime.strptime(date_str, "%Y-%m-%d")
-        # Trendlyne uses IST. Ensure we are generating correct epoch
-        # Assume server is in UTC, add 5.5 hours for IST if needed, but requests usually take epoch
         min_time = int(dt.replace(hour=9, minute=15).timestamp() * 1000)
         max_time = int(dt.replace(hour=15, minute=30).timestamp() * 1000)
 
-        data = self.get_live_oi_data(stock_id, current_expiry, min_time, max_time)
-        # Handle case where date_str is historical and current_expiry might not have data
-        return data
+        params = {
+            'stockId': stock_id,
+            'expDateList': current_expiry,
+            'minTime': min_time,
+            'maxTime': max_time
+        }
+        try:
+            response = requests.get(f"{self.base_url}/live-oi-data/", params=params, timeout=10)
+            return response.json()
+        except Exception:
+            return None
