@@ -28,9 +28,6 @@ class Backfiller:
             return count > 0
 
     def backfill_date(self, date_str):
-        """
-        date_str: 'YYYY-MM-DD'
-        """
         print(f"Checking data for {date_str}...")
 
         for symbol in self.symbols:
@@ -42,8 +39,7 @@ class Backfiller:
             print(f"Backfilling {symbol} for {date_str}...")
 
             # 1. Fetch OHLCV from TV
-            # To get specific day, we might need to fetch more bars and filter
-            ohlcv_df = self.tv.get_ohlcv(clean_symbol, n_bars=5000) # Fetch max possible
+            ohlcv_df = self.tv.get_ohlcv(clean_symbol, n_bars=5000)
             if ohlcv_df is not None and not ohlcv_df.empty:
                 ohlcv_df = ohlcv_df[ohlcv_df.index.strftime('%Y-%m-%d') == date_str]
 
@@ -54,34 +50,57 @@ class Backfiller:
                 print(f"No historical data found for {symbol} on {date_str}")
                 continue
 
-            # Process and Save
-            # This is a simplified consolidation for backfill.
-            # Trendlyne data structure might vary, but we attempt to map it to our schema.
-            # For demonstration, we'll iterate through the OHLCV minutes and save.
-
+            # Process Market Data
             if ohlcv_df is not None and not ohlcv_df.empty:
                 for ts, row in ohlcv_df.iterrows():
                     ts_str = ts.strftime("%Y-%m-%d %H:%M:%S")
-
                     market_record = {
                         'timestamp': ts_str,
                         'symbol': symbol,
-                        'spot_price': row['close'], # Using close as spot if not available
+                        'spot_price': row['close'],
                         'open': row['open'],
                         'high': row['high'],
                         'low': row['low'],
                         'close': row['close'],
                         'volume': row['volume'],
-                        'total_pcr': None, # PCR might be hard to backfill without full chain
+                        'total_pcr': None,
                         'pcr_change': None
                     }
                     self.db.save_market_data(market_record)
 
-            # If Trendlyne provides strike-wise data in its response:
-            if tl_data and 'body' in tl_data and 'data' in tl_data['body']:
-                # Note: Trendlyne's structure needs to be mapped to option_data table.
-                # Usually it returns a list of data points with OI for various strikes.
-                pass
+            # Process Options/OI Data from Trendlyne
+            if tl_data and 'body' in tl_data:
+                option_records = []
+                # Trendlyne structure mapping
+                # body usually contains 'strikeWiseData' or similar
+                # Let's assume it has a list under 'data' or 'body'
+                data_list = tl_data['body'].get('data', [])
+                if not data_list and 'strikeWiseData' in tl_data['body']:
+                    data_list = tl_data['body']['strikeWiseData']
+
+                for entry in data_list:
+                    try:
+                        # Map fields
+                        ts_val = entry.get('time') or entry.get('timestamp')
+                        if not ts_val: continue
+
+                        ts = datetime.fromtimestamp(ts_val / 1000.0).strftime("%Y-%m-%d %H:%M:%S")
+
+                        option_records.append({
+                            'timestamp': ts,
+                            'symbol': symbol,
+                            'strike_price': entry.get('strike') or entry.get('strike_price'),
+                            'expiry_date': entry.get('expiry_date') or entry.get('expiryDate', ''),
+                            'option_type': entry.get('option_type') or entry.get('optionType'),
+                            'price': entry.get('ltp') or entry.get('price'),
+                            'oi': entry.get('oi') or entry.get('open_interest'),
+                            'oi_change': entry.get('oi_change') or entry.get('change_in_oi')
+                        })
+                    except:
+                        continue
+
+                if option_records:
+                    self.db.save_option_data(option_records)
 
         print(f"Backfill complete for {date_str}")
 
