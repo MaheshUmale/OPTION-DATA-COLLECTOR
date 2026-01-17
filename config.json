@@ -1,0 +1,12 @@
+{
+    "symbols": ["NSE|INDEX|NIFTY", "NSE|INDEX|BANKNIFTY"],
+    "strike_gaps": {
+        "NIFTY": 50,
+        "BANKNIFTY": 100
+    },
+    "db_name": "options_data.db",
+    "market_hours": {
+        "start": "09:15",
+        "end": "15:30"
+    }
+}
