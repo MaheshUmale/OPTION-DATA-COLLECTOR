@@ -41,8 +41,6 @@ class NSEClient:
             return None
 
     def get_option_chain(self, symbol, indices=True):
-        # Map canonical/clean symbol to NSE API symbol
-        # NIFTY 50 -> NIFTY, NIFTY BANK -> BANKNIFTY
         nse_symbol = symbol
         if "NIFTY" in symbol and "BANK" not in symbol: nse_symbol = "NIFTY"
         elif "BANK" in symbol: nse_symbol = "BANKNIFTY"
@@ -69,7 +67,6 @@ class TVClient:
 
     def get_ohlcv(self, symbol, exchange='NSE', interval=Interval.in_1_minute, n_bars=1):
         if not self.tv: return None
-        # TradingView symbol mapping
         tv_symbol = symbol
         if "NIFTY" in symbol and "BANK" not in symbol: tv_symbol = "NIFTY"
         elif "BANK" in symbol: tv_symbol = "BANKNIFTY"
@@ -85,7 +82,6 @@ class TrendlyneClient:
 
     def get_stock_id_for_symbol(self, symbol):
         s = symbol.upper().split('|')[-1] if '|' in symbol else symbol.upper()
-        # Trendlyne mapping
         if "NIFTY" in s and "BANK" not in s: search_query = "NIFTY"
         elif "BANK" in s: search_query = "BANKNIFTY"
         else: search_query = s
@@ -111,7 +107,12 @@ class TrendlyneClient:
             return []
 
     def get_live_oi_data(self, stock_id, expiry_date, min_time, max_time):
-        params = {'stockId': stock_id, 'expDateList': expiry_date, 'minTime': min_time, 'maxTime': max_time}
+        params = {
+            'stockId': stock_id,
+            'expDateList': expiry_date,
+            'minTime': min_time,
+            'maxTime': max_time
+        }
         try:
             response = requests.get(f"{self.base_url}/live-oi-data/", params=params, timeout=10)
             return response.json()
@@ -123,10 +124,22 @@ class TrendlyneClient:
         if not stock_id: return None
         expiries = self.get_expiry_dates(stock_id)
         if not expiries: return None
-        # For historical, we might need to find the expiry that was active on that date
-        # For now, taking the first one (usually near-month)
-        current_expiry = expiries[0]
+
+        # Check if requested date is in expiries list (if date_str is an expiry)
+        # or just take the first expiry that is >= date_str
+        current_expiry = None
+        for exp in expiries:
+            if exp >= date_str:
+                current_expiry = exp
+                break
+        if not current_expiry: current_expiry = expiries[0]
+
         dt = datetime.strptime(date_str, "%Y-%m-%d")
+        # Trendlyne uses IST. Ensure we are generating correct epoch
+        # Assume server is in UTC, add 5.5 hours for IST if needed, but requests usually take epoch
         min_time = int(dt.replace(hour=9, minute=15).timestamp() * 1000)
         max_time = int(dt.replace(hour=15, minute=30).timestamp() * 1000)
-        return self.get_live_oi_data(stock_id, current_expiry, min_time, max_time)
+
+        data = self.get_live_oi_data(stock_id, current_expiry, min_time, max_time)
+        # Handle case where date_str is historical and current_expiry might not have data
+        return data
