@@ -2,7 +2,7 @@ import requests
 import time
 import pandas as pd
 from tvDatafeed import TvDatafeed, Interval
-from datetime import datetime
+from datetime import datetime, timedelta
 
 class NSEClient:
     def __init__(self):
@@ -26,7 +26,7 @@ class NSEClient:
             print(f"[NSE] Failed to initialize session: {e}")
 
     def _make_get_request(self, url, params=None, referer=None):
-        time.sleep(2.0)
+        time.sleep(1.0)
         headers = self.headers.copy()
         headers["Referer"] = referer if referer else self.base_url
         try:
@@ -88,10 +88,39 @@ class TrendlyneClient:
             pass
         return None
 
+    def get_expiry_dates(self, stock_id):
+        url = f"{self.base_url}/fno/get-expiry-dates/?mtype=options&stock_id={stock_id}"
+        try:
+            response = requests.get(url, timeout=5)
+            return response.json().get('body', {}).get('expiryDates', [])
+        except Exception:
+            return []
+
     def get_live_oi_data(self, stock_id, expiry_date, min_time, max_time):
+        """
+        min_time, max_time in epoch milliseconds or format Trendlyne expects
+        """
         params = {'stockId': stock_id, 'expDateList': expiry_date, 'minTime': min_time, 'maxTime': max_time}
         try:
             response = requests.get(f"{self.base_url}/live-oi-data/", params=params, timeout=10)
             return response.json()
         except Exception:
             return None
+
+    def get_historical_oi(self, symbol, date_str):
+        """
+        date_str: 'YYYY-MM-DD'
+        """
+        stock_id = self.get_stock_id_for_symbol(symbol)
+        if not stock_id: return None
+
+        expiries = self.get_expiry_dates(stock_id)
+        if not expiries: return None
+        current_expiry = expiries[0] # Assuming first is near-month
+
+        # Convert date_str to Trendlyne time range (usually epoch ms)
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        min_time = int(dt.replace(hour=9, minute=15).timestamp() * 1000)
+        max_time = int(dt.replace(hour=15, minute=30).timestamp() * 1000)
+
+        return self.get_live_oi_data(stock_id, current_expiry, min_time, max_time)
